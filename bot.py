@@ -1,6 +1,6 @@
 import discord
 from discord.ext import commands
-from discord.ui import View, Button
+from discord.ui import View, Button, Modal, TextInput
 import os
 import json
 from datetime import datetime, timedelta
@@ -12,39 +12,89 @@ KEYS_FILE = "keys.json"
 intents = discord.Intents.all()
 bot = commands.Bot(command_prefix="!", intents=intents)
 
-# Load keys from file
 def load_keys():
     if not os.path.exists(KEYS_FILE):
         return {}
     with open(KEYS_FILE, "r") as f:
         return json.load(f)
 
-# Save keys to file
 def save_keys(keys):
     with open(KEYS_FILE, "w") as f:
         json.dump(keys, f, indent=4)
 
-# Generate 8-digit random key
 def generate_key(length=8):
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=length))
 
-# Persistent Panel View
+class RedeemModal(Modal):
+    def __init__(self):
+        super().__init__(title="Redeem Your Key")
+
+        self.key_input = TextInput(
+            label="Enter your 8-digit key",
+            placeholder="ABCDEFGH",
+            max_length=8,
+            min_length=8,
+            required=True
+        )
+        self.add_item(self.key_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        key = self.key_input.value.upper()
+        keys = load_keys()
+
+        if key not in keys:
+            await interaction.response.send_message("❌ Invalid key.", ephemeral=True)
+            return
+
+        data = keys[key]
+
+        if data["redeemed_by"] and data["redeemed_by"] != str(interaction.user.id):
+            await interaction.response.send_message("❌ This key is already redeemed by another user.", ephemeral=True)
+            return
+
+        expires_at = datetime.fromisoformat(data["expires_at"])
+        if datetime.utcnow() > expires_at:
+            await interaction.response.send_message("❌ This key has expired.", ephemeral=True)
+            return
+
+        if not data["redeemed_by"]:
+            data["redeemed_by"] = str(interaction.user.id)
+            save_keys(keys)
+
+        await interaction.response.send_message(f"✅ Key redeemed successfully! Locked to {interaction.user.mention}", ephemeral=True)
+
 class Panel(View):
     def __init__(self):
         super().__init__(timeout=None)
 
     @discord.ui.button(label="Redeem Key", style=discord.ButtonStyle.primary, custom_id="redeem_key")
     async def redeem_key(self, button: discord.ui.Button, interaction: discord.Interaction):
-        await interaction.response.send_message("Please use the command `!redeem <key>` to redeem your key.", ephemeral=True)
+        modal = RedeemModal()
+        await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="Reset HWID", style=discord.ButtonStyle.secondary, custom_id="reset_hwid")
     async def reset_hwid(self, button: discord.ui.Button, interaction: discord.Interaction):
-        # Placeholder: You can add actual HWID reset logic here
-        await interaction.response.send_message("HWID reset is not implemented yet.", ephemeral=True)
+        keys = load_keys()
+        user_id = str(interaction.user.id)
+        found_key = None
+
+        # Find user's redeemed key
+        for key, data in keys.items():
+            if data.get("redeemed_by") == user_id:
+                found_key = key
+                break
+
+        if not found_key:
+            await interaction.response.send_message("❌ You have no redeemed key to reset.", ephemeral=True)
+            return
+
+        keys[found_key]["redeemed_by"] = None
+        save_keys(keys)
+        await interaction.response.send_message(f"✅ Your key `{found_key}` has been reset and is now unclaimed.", ephemeral=True)
 
     @discord.ui.button(label="Get Role", style=discord.ButtonStyle.success, custom_id="get_role")
     async def get_role(self, button: discord.ui.Button, interaction: discord.Interaction):
-        role_name = "Member"  # Change to your role name
+        role_name = "Member"
         role = discord.utils.get(interaction.guild.roles, name=role_name)
         if role:
             if role not in interaction.user.roles:
@@ -53,7 +103,7 @@ class Panel(View):
             else:
                 await interaction.response.send_message(f"You already have the role '{role_name}'.", ephemeral=True)
         else:
-            await interaction.response.send_message(f"Role '{role_name}' not found on this server.", ephemeral=True)
+            await interaction.response.send_message(f"Role '{role_name}' not found.", ephemeral=True)
 
     @discord.ui.button(label="Stats", style=discord.ButtonStyle.secondary, custom_id="stats")
     async def stats(self, button: discord.ui.Button, interaction: discord.Interaction):
@@ -70,107 +120,43 @@ async def on_ready():
 
 @bot.command()
 @commands.has_permissions(administrator=True)
-async def generatekey(ctx, duration: str):
-    """Generate an 8-digit key that expires after a duration (e.g. 10m, 2h, 1d)"""
-    keys = load_keys()
-
-    # Parse duration
-    try:
-        unit = duration[-1]
-        amount = int(duration[:-1])
-        if unit == 'm':
-            expire = timedelta(minutes=amount)
-        elif unit == 'h':
-            expire = timedelta(hours=amount)
-        elif unit == 'd':
-            expire = timedelta(days=amount)
-        else:
-            await ctx.send("Invalid duration unit! Use m, h, or d.")
-            return
-    except Exception:
-        await ctx.send("Invalid duration format! Example: 10m, 2h, 1d")
+async def genkey(ctx, days: int):
+    """Admin command to generate an 8-digit key valid for X days."""
+    if days <= 0:
+        await ctx.send("❌ Please enter a positive number of days.")
         return
 
-    key = generate_key()
-    now = datetime.utcnow()
-    keys[key] = {
-        "created_at": now.isoformat(),
-        "expires_at": (now + expire).isoformat(),
+    keys = load_keys()
+    new_key = generate_key(8)
+    expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
+
+    keys[new_key] = {
+        "expires_at": expires_at,
         "redeemed_by": None
     }
+
     save_keys(keys)
-
-    await ctx.send(f"✅ Key generated: `{key}`\nExpires in: {duration}")
-
-@bot.command()
-async def redeem(ctx, key: str):
-    """Redeem a key and lock it to your Discord ID"""
-    keys = load_keys()
-    key = key.upper()
-
-    if key not in keys:
-        await ctx.send("❌ Invalid key.")
-        return
-
-    data = keys[key]
-
-    if data["redeemed_by"] and data["redeemed_by"] != str(ctx.author.id):
-        await ctx.send("❌ This key is already redeemed by another user.")
-        return
-
-    expires_at = datetime.fromisoformat(data["expires_at"])
-    if datetime.utcnow() > expires_at:
-        await ctx.send("❌ This key has expired.")
-        return
-
-    if not data["redeemed_by"]:
-        data["redeemed_by"] = str(ctx.author.id)
-        save_keys(keys)
-
-    await ctx.send(f"✅ Key redeemed successfully! Locked to {ctx.author.mention}")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def revokekey(ctx, key: str):
-    """Revoke a key"""
-    keys = load_keys()
-    key = key.upper()
-
-    if key not in keys:
-        await ctx.send("❌ Key not found.")
-        return
-
-    del keys[key]
-    save_keys(keys)
-    await ctx.send(f"✅ Key `{key}` revoked and deleted.")
-
-@bot.command()
-@commands.has_permissions(administrator=True)
-async def keyinfo(ctx, key: str):
-    """Get info about a key"""
-    keys = load_keys()
-    key = key.upper()
-
-    if key not in keys:
-        await ctx.send("❌ Key not found.")
-        return
-
-    data = keys[key]
-    created = data["created_at"]
-    expires = data["expires_at"]
-    redeemed_by = data["redeemed_by"] or "Not redeemed"
-
-    await ctx.send(f"**Key:** `{key}`\nCreated at: {created}\nExpires at: {expires}\nRedeemed by: {redeemed_by}")
+    await ctx.send(f"✅ Generated key `{new_key}` valid for {days} days.")
 
 @bot.command()
 async def panel(ctx):
-    """Show the interactive panel with buttons"""
-    await ctx.send("Select an option:", view=Panel())
+    embed = discord.Embed(
+        title="JHUB Key System",
+        description="Use the buttons below to redeem keys, reset HWID, get roles, and view stats.",
+        color=discord.Color.blue()
+    )
+    await ctx.send(embed=embed, view=Panel())
 
-# Run your bot
-token = os.getenv("DISCORD_TOKEN")
-if not token:
-    print("❌ DISCORD_TOKEN not set in environment variables.")
-    exit(1)
+# Error handler for permissions
+@genkey.error
+async def genkey_error(ctx, error):
+    if isinstance(error, commands.MissingPermissions):
+        await ctx.send("❌ You do not have permission to use this command.")
 
-bot.run(token)
+if __name__ == "__main__":
+    token = os.getenv("DISCORD_TOKEN")
+    if not token:
+        print("❌ Error: DISCORD_TOKEN environment variable not found.")
+        exit(1)
+    bot.run(token)
+
