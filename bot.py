@@ -64,7 +64,9 @@ class RedeemModal(Modal):
             data["redeemed_by"] = str(interaction.user.id)
             save_keys(keys)
 
-        await interaction.response.send_message(f"✅ Key redeemed successfully! Locked to {interaction.user.mention}", ephemeral=True)
+        await interaction.response.send_message(
+            f"✅ Key redeemed successfully! Locked to {interaction.user.mention}", ephemeral=True
+        )
 
 
 # ----------------- PANEL VIEW -----------------
@@ -120,11 +122,26 @@ class Panel(View):
         )
 
 
+# ----------------- BACKGROUND TASK -----------------
+@tasks.loop(hours=1)
+async def prune_expired_keys():
+    keys = load_keys()
+    now = datetime.utcnow()
+    before = len(keys)
+
+    keys = {k: v for k, v in keys.items() if datetime.fromisoformat(v["expires_at"]) > now}
+
+    if len(keys) < before:
+        save_keys(keys)
+        print(f"🗑️ Pruned {before - len(keys)} expired keys.")
+
+
 # ----------------- EVENTS -----------------
 @bot.event
 async def on_ready():
-    bot.add_view(Panel())
-    prune_expired_keys.start()  # start background task
+    bot.add_view(Panel())  # Persistent buttons
+    prune_expired_keys.start()  # Start pruning expired keys
+    await bot.tree.sync()       # Sync slash commands
     print(f"✅ {bot.user} is online and ready.")
 
 
@@ -147,24 +164,14 @@ async def genkey(ctx, days: int):
     await ctx.send(f"✅ Generated key `{new_key}` valid for {days} days.")
 
 
-@bot.tree.command(name="genkey", description="Generate an 8-digit key valid for X days (admin only)")
-async def slash_genkey(interaction: discord.Interaction, days: int):
-    if not interaction.user.guild_permissions.administrator:
-        await interaction.response.send_message("❌ You do not have permission to use this command.", ephemeral=True)
-        return
-
-    if days <= 0:
-        await interaction.response.send_message("❌ Please enter a positive number of days.", ephemeral=True)
-        return
-
-    keys = load_keys()
-    new_key = generate_key(8)
-    expires_at = (datetime.utcnow() + timedelta(days=days)).isoformat()
-
-    keys[new_key] = {"expires_at": expires_at, "redeemed_by": None}
-    save_keys(keys)
-
-    await interaction.response.send_message(f"✅ Generated key `{new_key}` valid for {days} days.", ephemeral=True)
+@bot.tree.command(name="panel", description="Open the key panel")
+async def panel_slash(interaction: discord.Interaction):
+    embed = discord.Embed(
+        title="JHUB Key System",
+        description="Use the buttons below to redeem keys, reset HWID, get roles, and view stats.",
+        color=discord.Color.blue()
+    )
+    await interaction.response.send_message(embed=embed, view=Panel(), ephemeral=True)
 
 
 @bot.command()
@@ -183,34 +190,10 @@ async def genkey_error(ctx, error):
         await ctx.send("❌ You do not have permission to use this command.")
 
 
-# ----------------- BACKGROUND TASK -----------------
-@tasks.loop(hours=1)
-async def prune_expired_keys():
-    keys = load_keys()
-    now = datetime.utcnow()
-    before = len(keys)
-
-    keys = {
-        k: v for k, v in keys.items()
-        if datetime.fromisoformat(v["expires_at"]) > now
-    }
-
-    if len(keys) < before:
-        save_keys(keys)
-        print(f"🗑️ Pruned {before - len(keys)} expired keys.")
-
-
 # ----------------- MAIN -----------------
 if __name__ == "__main__":
     token = os.getenv("DISCORD_TOKEN")
     if not token:
         print("❌ Error: DISCORD_TOKEN environment variable not found.")
         exit(1)
-
-    # sync slash commands
-    async def main():
-        async with bot:
-            await bot.start(token)
-
-    import asyncio
-    asyncio.run(main())
+    bot.run(token)
